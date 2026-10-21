@@ -1,55 +1,88 @@
-# Zentinel Helm Chart
+<p align="center">
+  <a href="https://zentinelproxy.io">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/zentinelproxy/design/main/marks/lockup/zentinel-lockup-dark.svg">
+      <img alt="Zentinel" src="https://raw.githubusercontent.com/zentinelproxy/design/main/marks/lockup/zentinel-lockup-light.svg" height="52">
+    </picture>
+  </a>
+</p>
 
-Helm chart for deploying [Zentinel](https://github.com/zentinelproxy/zentinel) - a high-performance, security-focused reverse proxy built on Cloudflare's Pingora.
+<h3 align="center">Zentinel Helm chart</h3>
 
-> **The chart repository is not live yet.** `https://charts.zentinelproxy.io`
-> does not resolve — there is no DNS record, no `gh-pages` branch and no chart
-> release automation in this repo. `helm repo add` will fail. Install from a
-> clone until that changes.
+<p align="center">A Helm chart that runs the Zentinel proxy on Kubernetes from a KDL configuration you supply.</p>
 
-## Quick Start
+<p align="center">
+  <a href="https://docs.zentinelproxy.io/deployment/kubernetes/">Kubernetes guide</a> &middot;
+  <a href="https://docs.zentinelproxy.io">Docs</a> &middot;
+  <a href="https://github.com/zentinelproxy">All repositories</a>
+</p>
 
-```bash
-git clone https://github.com/zentinelproxy/zentinel-helm.git
-cd zentinel-helm
+The chart deploys [Zentinel](https://github.com/zentinelproxy/zentinel) as a
+Deployment with a Service, a ConfigMap holding `zentinel.kdl`, and optional
+Ingress, HorizontalPodAutoscaler, PodDisruptionBudget and Prometheus
+ServiceMonitor. It runs `ghcr.io/zentinelproxy/zentinel` at the chart's
+`appVersion` (`26.08_2`, chart version `0.1.2`) as a non-root user with a
+read-only root filesystem.
 
-# Install with default values
-helm install zentinel .
+> **No chart repository yet.** `https://charts.zentinelproxy.io` does not
+> resolve: there is no DNS record, no `gh-pages` branch and no chart release
+> automation in this repository, so `helm repo add` fails. Install from a clone
+> or a tarball.
 
-# Install with custom configuration
-helm install zentinel . -f my-values.yaml
-```
+## Quick start
 
-Or install a specific version straight from a tarball of this repository:
+Always pass a configuration. The built-in default ConfigMap has no `system`
+block, which the proxy requires, so a release installed without `config.raw`
+or `config.existingConfigMap` does not start.
 
-```bash
-helm install zentinel \
-  https://github.com/zentinelproxy/zentinel-helm/archive/refs/heads/main.tar.gz
-```
-
-The chart deploys `ghcr.io/zentinelproxy/zentinel` at the tag matching the
-chart's `appVersion`. Override it with `--set image.tag=<tag>` — published tags
-use Zentinel's CalVer scheme (for example `26.08_1`), plus `latest`.
-
-## Configuration
-
-See [values.yaml](values.yaml) for the full list of configuration options.
-
-### Basic Example
+Save this as `values.yaml`. It is the smallest configuration that fits the
+chart: the container ports are fixed at 80 (`http`), 443 (`https`) and 9090
+(`metrics`), and the liveness and readiness probes call `GET /health` on 9090,
+so the configuration serves `/health` and `/metrics` from a listener on 9090
+and turns off the separate metrics server, which would otherwise bind 9090 and
+answer `/health` with 404.
 
 ```yaml
-replicaCount: 2
-
 config:
   raw: |
+    system {
+        worker-threads 0
+    }
+
+    observability {
+        metrics {
+            enabled #false
+        }
+    }
+
     listeners {
         listener "http" {
             address "0.0.0.0:80"
             protocol "http"
         }
+        listener "admin" {
+            address "0.0.0.0:9090"
+            protocol "http"
+            default-route "health"
+        }
     }
 
     routes {
+        route "health" {
+            priority "high"
+            matches {
+                path "/health"
+                path "/ready"
+            }
+            service-type "builtin"
+            builtin-handler "health"
+        }
+        route "metrics" {
+            priority "high"
+            matches { path "/metrics" }
+            service-type "builtin"
+            builtin-handler "metrics"
+        }
         route "api" {
             matches { path-prefix "/api" }
             upstream "backend"
@@ -59,12 +92,67 @@ config:
     upstreams {
         upstream "backend" {
             target "my-service:8080"
-            health-check { path "/health" }
+            health-check {
+                type "http" {
+                    path "/health"
+                }
+            }
         }
     }
 ```
 
-### Using an Existing ConfigMap
+Check it locally with `zentinel test -c <file>`, then install:
+
+```bash
+git clone https://github.com/zentinelproxy/zentinel-helm.git
+helm install zentinel ./zentinel-helm -f values.yaml
+```
+
+## Install
+
+From a clone (above), or straight from a tarball of a branch:
+
+```bash
+helm install zentinel \
+  https://github.com/zentinelproxy/zentinel-helm/archive/refs/heads/main.tar.gz \
+  -f values.yaml
+```
+
+To run another proxy release, set `--set image.tag=<tag>`. Published tags
+follow Zentinel's CalVer scheme (for example `26.08_2`), plus `latest`.
+
+## Configuration
+
+[`values.yaml`](values.yaml) lists every value. The common ones:
+
+| Option | Default | Meaning |
+|---|---|---|
+| `replicaCount` | `1` | Replicas (ignored when autoscaling is on) |
+| `image.repository` | `ghcr.io/zentinelproxy/zentinel` | Image repository |
+| `image.tag` | `""` | Image tag; empty uses the chart `appVersion` |
+| `image.pullPolicy` | `IfNotPresent` | Image pull policy |
+| `config.raw` | `""` | KDL configuration written to the chart's ConfigMap |
+| `config.existingConfigMap` | `""` | Use this ConfigMap instead of creating one |
+| `config.configKey` | `zentinel.kdl` | Key in the ConfigMap that holds the configuration |
+| `env`, `envFrom` | `[]` | Extra environment, e.g. `RUST_LOG` |
+| `service.type` | `ClusterIP` | Service type |
+| `service.httpPort` / `httpsPort` / `metricsPort` | `80` / `443` / `9090` | Service ports (container ports are fixed at 80, 443, 9090) |
+| `service.loadBalancerIP` | `""` | Used when `service.type` is `LoadBalancer` |
+| `resources` | requests `100m`/`128Mi`, limits `1000m`/`512Mi` | Container resources |
+| `securityContext` | non-root UID `65534`, read-only root, all capabilities dropped | Container security context |
+| `livenessProbe`, `readinessProbe` | `GET /health` on `metrics` | Probes; change them if your config serves health elsewhere |
+| `autoscaling.enabled` | `false` | HPA, 2 to 10 replicas at 80% CPU and memory |
+| `podDisruptionBudget.enabled` | `false` | PDB with `minAvailable: 1` |
+| `serviceMonitor.enabled` | `false` | Prometheus Operator ServiceMonitor scraping the `metrics` port every 30 s |
+| `ingress.enabled` | `false` | Ingress for the `http` port |
+| `extraVolumes`, `extraVolumeMounts` | `[]` | Extra volumes, e.g. TLS secrets |
+| `initContainers`, `sidecars` | `[]` | Extra containers in the pod |
+| `nodeSelector`, `tolerations`, `affinity`, `topologySpreadConstraints` | empty | Scheduling |
+
+The proxy's own options are documented in the
+[configuration reference](https://docs.zentinelproxy.io/configuration/).
+
+### Existing ConfigMap
 
 ```yaml
 config:
@@ -72,7 +160,7 @@ config:
   configKey: zentinel.kdl
 ```
 
-### Enabling Autoscaling
+### Autoscaling, monitoring, ingress
 
 ```yaml
 autoscaling:
@@ -80,19 +168,11 @@ autoscaling:
   minReplicas: 2
   maxReplicas: 10
   targetCPUUtilizationPercentage: 80
-```
 
-### Prometheus Monitoring
-
-```yaml
 serviceMonitor:
   enabled: true
   interval: 30s
-```
 
-### Ingress
-
-```yaml
 ingress:
   enabled: true
   className: nginx
@@ -109,63 +189,9 @@ ingress:
         - proxy.example.com
 ```
 
-## Parameters
+### TLS certificates
 
-### Global
-
-| Parameter | Description | Default |
-|-----------|-------------|---------|
-| `replicaCount` | Number of replicas | `1` |
-| `image.repository` | Image repository | `ghcr.io/zentinelproxy/zentinel` |
-| `image.tag` | Image tag | `""` (uses appVersion) |
-| `image.pullPolicy` | Image pull policy | `IfNotPresent` |
-
-### Configuration
-
-| Parameter | Description | Default |
-|-----------|-------------|---------|
-| `config.raw` | Raw KDL configuration | `""` |
-| `config.existingConfigMap` | Use existing ConfigMap | `""` |
-| `config.configKey` | Key in ConfigMap | `zentinel.kdl` |
-
-### Service
-
-| Parameter | Description | Default |
-|-----------|-------------|---------|
-| `service.type` | Service type | `ClusterIP` |
-| `service.httpPort` | HTTP port | `80` |
-| `service.httpsPort` | HTTPS port | `443` |
-| `service.metricsPort` | Metrics port | `9090` |
-
-### Resources
-
-| Parameter | Description | Default |
-|-----------|-------------|---------|
-| `resources.limits.cpu` | CPU limit | `1000m` |
-| `resources.limits.memory` | Memory limit | `512Mi` |
-| `resources.requests.cpu` | CPU request | `100m` |
-| `resources.requests.memory` | Memory request | `128Mi` |
-
-### Security
-
-| Parameter | Description | Default |
-|-----------|-------------|---------|
-| `securityContext.runAsNonRoot` | Run as non-root | `true` |
-| `securityContext.runAsUser` | User ID | `65534` |
-| `securityContext.readOnlyRootFilesystem` | Read-only root | `true` |
-
-### Optional Features
-
-| Parameter | Description | Default |
-|-----------|-------------|---------|
-| `autoscaling.enabled` | Enable HPA | `false` |
-| `podDisruptionBudget.enabled` | Enable PDB | `false` |
-| `serviceMonitor.enabled` | Enable Prometheus ServiceMonitor | `false` |
-| `ingress.enabled` | Enable Ingress | `false` |
-
-## TLS Certificates
-
-Mount TLS certificates using `extraVolumes` and `extraVolumeMounts`:
+Mount a Secret with `extraVolumes` and `extraVolumeMounts`:
 
 ```yaml
 extraVolumes:
@@ -179,29 +205,42 @@ extraVolumeMounts:
     readOnly: true
 ```
 
-Then reference in your configuration:
+and point an HTTPS listener at the files (add it to the `listeners` block
+of the quick-start configuration):
 
-```yaml
-config:
-  raw: |
-    listeners {
-        listener "https" {
-            address "0.0.0.0:443"
-            protocol "https"
-            tls {
-                cert "/etc/zentinel/certs/tls.crt"
-                key "/etc/zentinel/certs/tls.key"
-            }
-        }
+```kdl
+listener "https" {
+    address "0.0.0.0:443"
+    protocol "https"
+    tls {
+        cert-file "/etc/zentinel/certs/tls.crt"
+        key-file "/etc/zentinel/certs/tls.key"
     }
+}
 ```
+
+## Development
+
+```bash
+helm lint .
+helm template zentinel . -f values.yaml     # render locally
+```
+
+There is no CI workflow in this repository yet.
 
 ## Related
 
-- [Zentinel](https://github.com/zentinelproxy/zentinel) - Main proxy repository
-- [Documentation](https://zentinelproxy.io/docs) - Full documentation
-- [Zentinel Agent SDK](https://github.com/zentinelproxy/zentinel-agent-sdk) - Build custom agents
+- [Zentinel](https://github.com/zentinelproxy/zentinel): the proxy
+- [Kubernetes guide](https://docs.zentinelproxy.io/deployment/kubernetes/) in the docs
+- [Rust agent SDK](https://github.com/zentinelproxy/zentinel-agent-rust-sdk): build custom agents
 
 ## License
 
-Apache-2.0
+This repository has no `LICENSE` file yet (`Chart.yaml` declares
+`artifacthub.io/license: Apache-2.0`).
+
+---
+
+<p align="center">
+  <sub>Part of <a href="https://zentinelproxy.io">Zentinel</a>, the security-first reverse proxy. The shisa guards the gate.</sub>
+</p>
