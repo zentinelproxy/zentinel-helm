@@ -236,8 +236,7 @@ There is no CI workflow in this repository yet.
 
 ## License
 
-This repository has no `LICENSE` file yet (`Chart.yaml` declares
-`artifacthub.io/license: Apache-2.0`).
+Apache-2.0, see [`LICENSE`](LICENSE).
 
 ---
 
